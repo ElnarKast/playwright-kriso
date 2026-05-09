@@ -111,8 +111,8 @@ test.describe('Add Books to Shopping Cart', () => {
     await input.press('Enter');
   }
 
-  // wait for results page to render (CI can be slow)
-  await expect(page.getByText(/Search Results|FEATURED/i)).toBeVisible({ timeout: 15_000 });
+   
+  await expect(page.locator('.sb-results-total').first()).toBeVisible({ timeout: 15_000 });
 }
 
 
@@ -122,6 +122,7 @@ test.describe('Add Books to Shopping Cart', () => {
   }
 
   // 1) Open product page from results (there is no add-to-cart on the cards)
+  async function addToCartByIndex(index: number) {
   const productLinks = page.getByRole('link', { name: /tolkien/i });
 
   await expect(productLinks.first()).toBeVisible({ timeout: 15_000 });

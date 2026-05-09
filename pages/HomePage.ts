@@ -18,7 +18,7 @@ export class HomePage extends BasePage {
   constructor(page: Page) {
     super(page);
     this.resultsTotal = this.page.locator('.sb-results-total');
-    this.addToCartLinks = this.page.getByRole('link', { name: /Lisa ostukorvi|Add to cart/i });
+    this.addToCartLinks = this.page.getByRole('link', { name: /Lisa ostukorvi|Add to (cart|basket)/i });
     this.addToCartMessage = this.page.locator('.item-messagebox');
     this.cartCount = this.page.locator('.cart-products');
     this.backButton = this.page.locator('.cartbtn-event.back');
@@ -92,10 +92,8 @@ export class HomePage extends BasePage {
       await input.press('Enter');
     }
 
-    // wait for results page to render
-    await this.page.getByText(/Search Results|FEATURED/i).first()
-      .waitFor({ state: 'visible', timeout: 15_000 })
-      .catch(() => null);
+    // Robust wait: results counter exists on results pages
+    await expect(this.resultsTotal.first()).toBeVisible({ timeout: 15_000 });
   }
 
 
@@ -104,7 +102,7 @@ export class HomePage extends BasePage {
   }
 
   async verifyAddToCartMessage() {
-     await expect(this.addToCartMessage).toContainText(/Toode lisati ostukorvi|added to (shopping )?cart/i);
+ await expect(this.addToCartMessage).toContainText(/Toode lisati ostukorvi|added to (shopping )?(cart|basket)/i);
   }
 
   async verifyCartCount(expectedCount: number) {
@@ -124,7 +122,7 @@ export class HomePage extends BasePage {
        await expect(this.noResultsMessage).toBeVisible();
     await expect(this.noResultsMessage).toContainText(/ei leitud|did not find any match/i);
   }
-
+// Kept for compatibility with existing code; no longer required by addToCartByIndex flow.
   private async ensureAddToCartLinksAvailable() {
     for (const term of this.fallbackSearchTerms) {
       if (await this.hasVisibleAddToCartLinks()) {
@@ -134,7 +132,7 @@ export class HomePage extends BasePage {
       await this.searchByKeyword(term);
     }
   }
-
+  // Kept for compatibility with existing code; no longer required by addToCartByIndex flow.
   private async hasVisibleAddToCartLinks(): Promise<boolean> {
     const count = await this.addToCartLinks.count();
     const maxChecks = Math.min(count, 20);
@@ -149,39 +147,72 @@ export class HomePage extends BasePage {
   }
 
   private async clickVisibleAddToCartByIndex(index: number) {
-    const addToCartControls = this.page
-      .getByRole('link', { name: /Lisa ostukorvi|Ostukorvi|Add to cart/i })
-      .or(this.page.getByRole('button', { name: /Lisa ostukorvi|Ostukorvi|Add to cart/i }));
-
-    // Give the page a moment to render results & controls (CI can be slower).
-    await addToCartControls.first().waitFor({ state: 'visible', timeout: 15_000 }).catch(() => null);
-
-    const count = await addToCartControls.count();
-    if (count === 0) {
-      throw new Error('No add-to-cart controls found (link/button) on the page.');
+    // If we're not on results page anymore, restart from home + search
+    const resultsVisible = await this.resultsTotal.first().isVisible().catch(() => false);
+    if (!resultsVisible) {
+      await this.page.goto(this.url, { waitUntil: 'domcontentloaded' });
+      await this.searchFor('tolkien');
     }
 
-    const visibleIndexes: number[] = [];
-    const maxChecks = Math.min(count, 20);
+    // Wait for results page
+    await expect(this.resultsTotal.first()).toBeVisible({ timeout: 15_000 });
+
+    // Pick a "product-like" link on the results page without relying on DOM classes
+    // or specific keywords (tolkien/harry potter/etc).
+    const allLinks = this.page.getByRole('link');
+    const total = await allLinks.count();
+
+    const candidateIndexes: number[] = [];
+    const maxChecks = Math.min(total, 140);
 
     for (let i = 0; i < maxChecks; i += 1) {
-      if (await addToCartControls.nth(i).isVisible().catch(() => false)) {
-        visibleIndexes.push(i);
+      const link = allLinks.nth(i);
+      const text = ((await link.innerText().catch(() => '')) || '').trim();
+      if (!text) continue;
+
+      const lower = text.toLowerCase();
+
+      // Skip obvious header/nav links
+      if (
+        /bestsellers|e-platforms|books in stock|help|log in|new account|categories|books|e-books|music books|language teaching materials|special offers|advanced search|shopping basket|wish list|your account|eng/.test(
+          lower
+        )
+      ) {
+        continue;
       }
+
+      // Product titles are usually not super short
+      if (text.length < 6) continue;
+
+      if (await link.isVisible().catch(() => false)) {
+        candidateIndexes.push(i);
+      }
+
+      if (candidateIndexes.length >= 25) break;
     }
 
-    if (visibleIndexes.length > 0) {
-      const safeVisibleIndex = Math.min(index, visibleIndexes.length - 1);
-      const target = addToCartControls.nth(visibleIndexes[safeVisibleIndex]);
-      await target.scrollIntoViewIfNeeded().catch(() => null);
-      await target.click();
-      return;
+    if (candidateIndexes.length === 0) {
+      throw new Error('No product-like links found on the results page.');
     }
 
-    // Fallback: click by index even if visibility checks didn't find any visible ones
-    const safeIndex = Math.min(index, count - 1);
-    const target = addToCartControls.nth(safeIndex);
-    await target.scrollIntoViewIfNeeded().catch(() => null);
-    await target.click();
+    const safe = Math.min(index, candidateIndexes.length - 1);
+    await allLinks.nth(candidateIndexes[safe]).click();
+
+    // Now on product page: click add-to-cart
+    const addToCart = this.page
+      .getByRole('button', { name: /Lisa ostukorvi|Ostukorvi|Add to (cart|basket)/i })
+      .or(this.page.getByRole('link', { name: /Lisa ostukorvi|Ostukorvi|Add to (cart|basket)/i }))
+      // common input submit buttons
+      .or(
+        this.page.locator(
+          'input[type="submit"][value*="ostukorvi" i], input[type="submit"][value*="cart" i], input[type="submit"][value*="basket" i]'
+        )
+      )
+      // common forms/buttons without good accessible name
+      .or(this.page.locator('form[action*="cart" i] button, form[action*="basket" i] button'))
+      .first();
+
+    await expect(addToCart).toBeVisible({ timeout: 15_000 });
+    await addToCart.click();
   }
 }
